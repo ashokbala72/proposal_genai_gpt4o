@@ -1,36 +1,33 @@
 # ------------------------------------------------------------
-# Proposal Co-Pilot — GPT-4o Compatible (Azure)
+# Proposal Co-Pilot — Setup before Tab 0
 # ------------------------------------------------------------
 from __future__ import annotations
-import os, re, json, hashlib
+import os, json
 from pathlib import Path
-from textwrap import dedent
 import streamlit as st
 from dotenv import load_dotenv
-import pandas as pd
 
+st.set_page_config(page_title="Proposal Co-Pilot GPT-4o", layout="wide")
 
-# Azure OpenAI
+# ------------------------------------------------------------
+# Azure OpenAI client (placeholder setup)
+# ------------------------------------------------------------
 try:
     from openai import AzureOpenAI
 except Exception:
     AzureOpenAI = None
 
-# ------------------------------------------------------------
-# Environment
-# ------------------------------------------------------------
 load_dotenv(override=True)
 
-AZURE_OPENAI_ENDPOINT   = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").strip().rstrip("/")
-AZURE_OPENAI_API_KEY    = (os.getenv("AZURE_OPENAI_API_KEY") or "").strip()
-AZURE_OPENAI_API_VERSION= (os.getenv("AZURE_OPENAI_API_VERSION") or "").strip()
-AZURE_OPENAI_DEPLOYMENT = (
+AZURE_OPENAI_ENDPOINT    = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").strip().rstrip("/")
+AZURE_OPENAI_API_KEY     = (os.getenv("AZURE_OPENAI_API_KEY") or "").strip()
+AZURE_OPENAI_API_VERSION = (os.getenv("AZURE_OPENAI_API_VERSION") or "").strip()
+AZURE_OPENAI_DEPLOYMENT  = (
     os.getenv("AZURE_OPENAI_DEPLOYMENT")
     or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
     or ""
 ).strip()
 
-# Create client
 if AzureOpenAI and AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY and AZURE_OPENAI_API_VERSION:
     try:
         client = AzureOpenAI(
@@ -44,148 +41,47 @@ else:
     client = None
 
 # ------------------------------------------------------------
-# Persistence (Tab 0 fields)
+# Persistence
 # ------------------------------------------------------------
 PERSIST_KEYS = [
     "company_profile","customer_overview","rfp_scope","objectives","stakeholders",
     "timeline","competitors","incumbent","constraints","pain_points",
-    "win_themes","success_metrics","extras",
-    "evaluation_criteria","out_of_scope"
+    "win_themes","success_metrics","extras","evaluation_criteria","out_of_scope"
 ]
 
-DATA_FILE = os.getenv("PROPOSAL_STORE", "proposal_inputs.json")
+def get_data_file(user_id: str) -> str:
+    safe_id = user_id.replace("@", "_").replace(".", "_").replace(" ", "_")
+    return f"proposal_inputs_{safe_id}.json"
 
-def load_persisted():
-    """Load persisted Tab 0 fields into st.session_state."""
-    try:
-        p = Path(DATA_FILE)
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                for k in PERSIST_KEYS:
-                    if k in data and isinstance(data[k], str):
-                        st.session_state.setdefault(k, data[k])
-    except Exception as e:
-        st.sidebar.warning(f"Could not load persisted data: {e}")
-
-def save_persisted():
-    """Save Tab 0 fields back to disk."""
-    try:
-        out = {k: st.session_state.get(k, "") for k in PERSIST_KEYS}
-        Path(DATA_FILE).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception as e:
-        st.sidebar.warning(f"Could not save data: {e}")
+def save_persisted(user_id: str):
+    data_file = get_data_file(user_id)
+    out = {k: st.session_state.get(k, "") for k in PERSIST_KEYS}
+    Path(data_file).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def mark_dirty():
     st.session_state["_dirty"] = True
 
 # ------------------------------------------------------------
-# Helpers
+# Sidebar: User ID
 # ------------------------------------------------------------
-def ctx_hash(*parts) -> str:
-    m = hashlib.md5()
-    for p in parts:
-        if isinstance(p, (bytes, bytearray)):
-            m.update(p)
-        else:
-            m.update(str(p).encode("utf-8", "ignore"))
-    return m.hexdigest()
-
-def gather_all_inputs() -> str:
-    """Collect all captured inputs for GenAI."""
-    data = []
-    for k, v in st.session_state.items():
-        if isinstance(v, str) and v.strip():
-            data.append(f"[{k}]\n{v.strip()}")
-    return "\n\n".join(data)
-
-def extract_client_name_from_overview(overview: str) -> str | None:
-    if not isinstance(overview, str) or not overview.strip():
-        return None
-    line1 = overview.strip().splitlines()[0].strip()
-    for sep in [":", " - ", "—", "(", ","]:
-        if sep in line1:
-            line1 = line1.split(sep, 1)[0].strip()
-            break
-    line1 = re.sub(r'^["\'«“]+|["\'»”]+$', "", line1).strip()
-    line1 = re.sub(r"\s{2,}", " ", line1).strip()
-    return line1 if re.search(r"[A-Za-z]", line1) else None
-
-def get_client_name() -> str:
-    if st.session_state.get("client_name"):
-        return st.session_state["client_name"]
-    ov = st.session_state.get("customer_overview", "")
-    derived = extract_client_name_from_overview(ov)
-    if derived:
-        st.session_state["client_name"] = derived
-        return derived
-    if st.session_state.get("customer_name"):
-        return st.session_state["customer_name"]
-    return "Client"
-
-# ------------------------------------------------------------
-# GPT-4o Safe ask_genai()
-# ------------------------------------------------------------
-def ask_genai(title: str, content: str, max_tokens: int | None = 1200) -> str:
-    """
-    GPT-4o Compatible Azure helper.
-      - Uses Chat Completions first
-      - Falls back to Responses API if API version >= 2025-03-01-preview
-      - Avoids unsupported params
-    """
-    API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "")
-    deployment  = os.getenv("AZURE_OPENAI_DEPLOYMENT") or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
-
-    if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, API_VERSION, deployment]):
-        return f"[GenAI disabled — missing Azure env values]\n\nPrompt:\n{content[:800]}"
-
-    prompt = (content or "").strip()
-    with st.spinner(f"Generating {title} with GPT-4o…"):
-        try:
-            # --- Try Chat API ---
-            kwargs = {"model": deployment, "messages": [{"role":"user","content":prompt}]}
-            if max_tokens is not None: kwargs["max_tokens"] = int(max_tokens)
-            resp = client.chat.completions.create(**kwargs)
-            return (resp.choices[0].message.content or "").strip()
-        except Exception as e1:
-            msg = str(e1)
-            token_issue = ("Unsupported parameter" in msg and "max_tokens" in msg) or ("max_completion_tokens" in msg)
-            if token_issue and API_VERSION >= "2025-03-01-preview":
-                try:
-                    r = client.responses.create(
-                        model=deployment,
-                        input=prompt,
-                        max_completion_tokens=(max_tokens or 512),
-                    )
-                    return getattr(r, "output_text", "").strip() or "[GenAI call returned empty content]"
-                except Exception as e2:
-                    return f"[GenAI error: {e2}]"
-            return f"[GenAI error: {e1}]"
-
-# ------------------------------------------------------------
-# App Shell
-# ------------------------------------------------------------
-st.set_page_config(page_title="Proposal Co-Pilot GPT-4o", layout="wide")
-st.title("📄 Proposal Co-Pilot — GPT-4o (Azure)")
-
-# Load persisted inputs before UI
-load_persisted()
-
 with st.sidebar:
-    st.markdown("**Azure Environment**")
-    st.code(
-        f"Endpoint: {AZURE_OPENAI_ENDPOINT}\n"
-        f"API Version: {AZURE_OPENAI_API_VERSION}\n"
-        f"Deployment: {AZURE_OPENAI_DEPLOYMENT}\n"
-        f"API Key set: {bool(AZURE_OPENAI_API_KEY)}",
-        language="text"
-    )
-    if not client:
-        st.warning("Azure client not initialized. Check env variables.")
-    st.markdown("---")
-    st.markdown("**Persistence**")
-    st.caption(f"Tab 0 fields auto-save to `{DATA_FILE}`")
+    st.markdown("### User Profile")
+    user_id = st.text_input("Enter your email or username", key="sidebar_user_id")
 
+# ------------------------------------------------------------
+# Load persisted data BEFORE UI renders
+# ------------------------------------------------------------
+if user_id:
+    data_file = get_data_file(user_id)
+    p = Path(data_file)
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            for k in PERSIST_KEYS:
+                if k in data:
+                    st.session_state[k] = data[k]  # force overwrite so widgets prefill
+        except Exception as e:
+            st.sidebar.error(f"Error loading saved data: {e}")
 
 # ------------------------------------------------------------
 # Tabs
@@ -200,11 +96,52 @@ TABS = st.tabs([
     "Proposal Writing & Storyboarding",
 ])
 
-# ------------------------------------------------------------
-# 0) Proposal Inputs (Persisted)
-# ------------------------------------------------------------
+import streamlit as st
+import json
+from pathlib import Path
+
+
+
+PERSIST_KEYS = [
+    "company_profile","customer_overview","rfp_scope","objectives","stakeholders",
+    "timeline","competitors","incumbent","constraints","pain_points",
+    "win_themes","success_metrics","extras","evaluation_criteria","out_of_scope"
+]
+
+def get_data_file(user_id: str) -> str:
+    safe_id = user_id.replace("@", "_").replace(".", "_").replace(" ", "_")
+    return f"proposal_inputs_{safe_id}.json"
+
+def load_persisted(user_id: str):
+    data_file = get_data_file(user_id)
+    p = Path(data_file)
+    if p.exists():
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k in PERSIST_KEYS:
+                if k in data and isinstance(data[k], str):
+                    st.session_state[k] = data[k]   # force set (not setdefault)
+
+def save_persisted(user_id: str):
+    data_file = get_data_file(user_id)
+    out = {k: st.session_state.get(k, "") for k in PERSIST_KEYS}
+    Path(data_file).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def mark_dirty():
+    st.session_state["_dirty"] = True
+
+
+# --- Load data before UI ---
+if user_id and not st.session_state.get("_loaded_once"):
+    load_persisted(user_id)
+    st.session_state["_loaded_once"] = True
+
+# --- Tabs ---
+
+
 with TABS[0]:
     st.subheader("Proposal Inputs (persisted)")
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -216,11 +153,6 @@ with TABS[0]:
         st.text_area("Expected Timeline / Milestones", key="timeline", height=140, on_change=mark_dirty)
 
     with col2:
-        _ov = st.session_state.get("customer_overview", "")
-        _derived_name = extract_client_name_from_overview(_ov)
-        if _derived_name and st.session_state.get("client_name") != _derived_name:
-            st.session_state["client_name"] = _derived_name
-
         st.text_area("Known Competitors (comma-separated)", key="competitors", height=100, on_change=mark_dirty)
         st.text_area("Incumbent(s) & Current State", key="incumbent", height=140, on_change=mark_dirty)
         st.text_area("Constraints / Dependencies", key="constraints", height=140, on_change=mark_dirty)
@@ -231,10 +163,21 @@ with TABS[0]:
         st.text_area("Evaluation Criteria", key="evaluation_criteria", height=100, on_change=mark_dirty)
         st.text_area("Out of Scope", key="out_of_scope", height=100, on_change=mark_dirty)
 
-    if st.session_state.get("_dirty"):
-        save_persisted()
+    # --- Save ---
+    if st.session_state.get("_dirty") and user_id:
+        save_persisted(user_id)
         st.session_state["_dirty"] = False
-        st.success("Saved all inputs to disk.")
+        st.success(f"✅ Saved inputs for {user_id}")
+    elif st.session_state.get("_dirty") and not user_id:
+        st.warning("⚠️ Inputs changed but not saved (no User ID).")
+
+    if user_id:
+        st.caption(f"Tab 0 fields auto-save to `{get_data_file(user_id)}`")
+    else:
+        st.caption("⚠️ Enter a User ID to enable persistence.")
+
+
+
 
 # ------------------------------------------------------------
 # 1) Market & Competitor Intelligence
