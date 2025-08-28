@@ -1,16 +1,88 @@
 # ------------------------------------------------------------
-# Proposal Co-Pilot — Setup before Tab 0
+# Proposal Co-Pilot — Setup + Tab 0 (fixed order)
 # ------------------------------------------------------------
 from __future__ import annotations
-import os, json
+import os, json, hashlib
 from pathlib import Path
 import streamlit as st
+from textwrap import dedent
 from dotenv import load_dotenv
+import pandas as pd
+
+# ------------------------------------------------------------
+# Helpers (all defined before tabs!)
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+PERSIST_KEYS = [
+    "company_profile","customer_overview","rfp_scope","objectives","stakeholders",
+    "timeline","competitors","incumbent","constraints","pain_points",
+    "win_themes","success_metrics","extras","evaluation_criteria","out_of_scope"
+]
+
+def get_data_file(user_id: str) -> str:
+    safe_id = user_id.replace("@", "_").replace(".", "_").replace(" ", "_")
+    return f"proposal_inputs_{safe_id}.json"
+
+def save_persisted(user_id: str):
+    """Save current session state to JSON file."""
+    data_file = get_data_file(user_id)
+    out = {k: st.session_state.get(k, "") for k in PERSIST_KEYS}
+    Path(data_file).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def gather_all_inputs() -> str:
+    """Collect all Tab 0 inputs into a formatted string for prompts."""
+    chunks = []
+    for k in PERSIST_KEYS:
+        v = st.session_state.get(k, "")
+        if v:
+            chunks.append(f"[{k}] {v}")
+    return "\n\n".join(chunks)
+
+def ctx_hash(*parts) -> str:
+    """Stable hash of context parts."""
+    h = hashlib.sha256()
+    for p in parts:
+        if p is None:
+            continue
+        h.update(str(p).encode("utf-8"))
+    return h.hexdigest()
+
+def ask_genai(label: str, prompt: str, max_tokens: int = 800) -> str:
+    """Call Azure OpenAI safely."""
+    if not client:
+        return f"[GenAI disabled — missing Azure env values]\n\nPrompt: {prompt[:400]}"
+    try:
+        resp = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You are a helpful proposal assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[GenAI call failed: {e}]"
+
+def get_client_name() -> str:
+    """Extract client name heuristically from inputs."""
+    txt = st.session_state.get("customer_overview","") or st.session_state.get("rfp_scope","")
+    if not txt:
+        return "Client"
+    words = txt.strip().split()
+    for w in words:
+        if w.istitle():
+            return w
+    return "Client"
+
 
 st.set_page_config(page_title="Proposal Co-Pilot GPT-4o", layout="wide")
 
 # ------------------------------------------------------------
-# Azure OpenAI client (placeholder setup)
+# Azure OpenAI client
 # ------------------------------------------------------------
 try:
     from openai import AzureOpenAI
@@ -40,48 +112,31 @@ if AzureOpenAI and AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY and AZURE_OPEN
 else:
     client = None
 
-# ------------------------------------------------------------
-# Persistence
-# ------------------------------------------------------------
-PERSIST_KEYS = [
-    "company_profile","customer_overview","rfp_scope","objectives","stakeholders",
-    "timeline","competitors","incumbent","constraints","pain_points",
-    "win_themes","success_metrics","extras","evaluation_criteria","out_of_scope"
-]
 
-def get_data_file(user_id: str) -> str:
-    safe_id = user_id.replace("@", "_").replace(".", "_").replace(" ", "_")
-    return f"proposal_inputs_{safe_id}.json"
 
-def save_persisted(user_id: str):
-    data_file = get_data_file(user_id)
-    out = {k: st.session_state.get(k, "") for k in PERSIST_KEYS}
-    Path(data_file).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
-
-def mark_dirty():
-    st.session_state["_dirty"] = True
 
 # ------------------------------------------------------------
-# Sidebar: User ID
+# Sidebar: User ID + preload persisted data
 # ------------------------------------------------------------
 with st.sidebar:
     st.markdown("### User Profile")
     user_id = st.text_input("Enter your email or username", key="sidebar_user_id")
 
-# ------------------------------------------------------------
-# Load persisted data BEFORE UI renders
-# ------------------------------------------------------------
 if user_id:
     data_file = get_data_file(user_id)
     p = Path(data_file)
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            for k in PERSIST_KEYS:
-                if k in data:
-                    st.session_state[k] = data[k]  # force overwrite so widgets prefill
+            for k, v in data.items():
+                if v is not None:
+                    st.session_state[k] = v    # ✅ overwrite even if key exists
+            st.sidebar.success(f"Loaded {data_file}")
         except Exception as e:
             st.sidebar.error(f"Error loading saved data: {e}")
+    else:
+        st.sidebar.info(f"No saved file found: {data_file}")
+
 
 # ------------------------------------------------------------
 # Tabs
@@ -93,51 +148,8 @@ TABS = st.tabs([
     "Spend",
     "Key Differentiators",
     "Commercial & Pricing Strategy",
-    "Proposal Writing & Storyboarding",
+    "Proposal Writing & Storyboarding"
 ])
-
-import streamlit as st
-import json
-from pathlib import Path
-
-
-
-PERSIST_KEYS = [
-    "company_profile","customer_overview","rfp_scope","objectives","stakeholders",
-    "timeline","competitors","incumbent","constraints","pain_points",
-    "win_themes","success_metrics","extras","evaluation_criteria","out_of_scope"
-]
-
-def get_data_file(user_id: str) -> str:
-    safe_id = user_id.replace("@", "_").replace(".", "_").replace(" ", "_")
-    return f"proposal_inputs_{safe_id}.json"
-
-def load_persisted(user_id: str):
-    data_file = get_data_file(user_id)
-    p = Path(data_file)
-    if p.exists():
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            for k in PERSIST_KEYS:
-                if k in data and isinstance(data[k], str):
-                    st.session_state[k] = data[k]   # force set (not setdefault)
-
-def save_persisted(user_id: str):
-    data_file = get_data_file(user_id)
-    out = {k: st.session_state.get(k, "") for k in PERSIST_KEYS}
-    Path(data_file).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
-
-def mark_dirty():
-    st.session_state["_dirty"] = True
-
-
-# --- Load data before UI ---
-if user_id and not st.session_state.get("_loaded_once"):
-    load_persisted(user_id)
-    st.session_state["_loaded_once"] = True
-
-# --- Tabs ---
-
 
 with TABS[0]:
     st.subheader("Proposal Inputs (persisted)")
@@ -145,38 +157,84 @@ with TABS[0]:
     col1, col2 = st.columns(2)
 
     with col1:
-        st.text_area("Your Company Profile", key="company_profile", height=140, on_change=mark_dirty)
-        st.text_area("Customer Overview", key="customer_overview", height=140, on_change=mark_dirty)
-        st.text_area("RFP Scope", key="rfp_scope", height=140, on_change=mark_dirty)
-        st.text_area("Customer Objectives / Outcomes", key="objectives", height=140, on_change=mark_dirty)
-        st.text_area("Key Stakeholders & Decision Makers", key="stakeholders", height=140, on_change=mark_dirty)
-        st.text_area("Expected Timeline / Milestones", key="timeline", height=140, on_change=mark_dirty)
+        st.text_area("Your Company Profile",
+                     key="company_profile",
+                     value=st.session_state.get("company_profile", ""),
+                     height=140)
+        st.text_area("Customer Overview",
+                     key="customer_overview",
+                     value=st.session_state.get("customer_overview", ""),
+                     height=140)
+        st.text_area("RFP Scope",
+                     key="rfp_scope",
+                     value=st.session_state.get("rfp_scope", ""),
+                     height=140)
+        st.text_area("Customer Objectives / Outcomes",
+                     key="objectives",
+                     value=st.session_state.get("objectives", ""),
+                     height=140)
+        st.text_area("Key Stakeholders & Decision Makers",
+                     key="stakeholders",
+                     value=st.session_state.get("stakeholders", ""),
+                     height=140)
+        st.text_area("Expected Timeline / Milestones",
+                     key="timeline",
+                     value=st.session_state.get("timeline", ""),
+                     height=140)
 
     with col2:
-        st.text_area("Known Competitors (comma-separated)", key="competitors", height=100, on_change=mark_dirty)
-        st.text_area("Incumbent(s) & Current State", key="incumbent", height=140, on_change=mark_dirty)
-        st.text_area("Constraints / Dependencies", key="constraints", height=140, on_change=mark_dirty)
-        st.text_area("Pain Points / Triggers", key="pain_points", height=140, on_change=mark_dirty)
-        st.text_area("Initial Win Themes", key="win_themes", height=140, on_change=mark_dirty)
-        st.text_area("What does success look like?", key="success_metrics", height=140, on_change=mark_dirty)
-        st.text_area("Any other context", key="extras", height=100, on_change=mark_dirty)
-        st.text_area("Evaluation Criteria", key="evaluation_criteria", height=100, on_change=mark_dirty)
-        st.text_area("Out of Scope", key="out_of_scope", height=100, on_change=mark_dirty)
+        st.text_area("Known Competitors (comma-separated)",
+                     key="competitors",
+                     value=st.session_state.get("competitors", ""),
+                     height=100)
+        st.text_area("Incumbent(s) & Current State",
+                     key="incumbent",
+                     value=st.session_state.get("incumbent", ""),
+                     height=140)
+        st.text_area("Constraints / Dependencies",
+                     key="constraints",
+                     value=st.session_state.get("constraints", ""),
+                     height=140)
+        st.text_area("Pain Points / Triggers",
+                     key="pain_points",
+                     value=st.session_state.get("pain_points", ""),
+                     height=140)
+        st.text_area("Initial Win Themes",
+                     key="win_themes",
+                     value=st.session_state.get("win_themes", ""),
+                     height=140)
+        st.text_area("What does success look like?",
+                     key="success_metrics",
+                     value=st.session_state.get("success_metrics", ""),
+                     height=140)
+        st.text_area("Any other context",
+                     key="extras",
+                     value=st.session_state.get("extras", ""),
+                     height=100)
+        st.text_area("Evaluation Criteria",
+                     key="evaluation_criteria",
+                     value=st.session_state.get("evaluation_criteria", ""),
+                     height=100)
+        st.text_area("Out of Scope",
+                     key="out_of_scope",
+                     value=st.session_state.get("out_of_scope", ""),
+                     height=100)
 
-    # --- Save ---
-    if st.session_state.get("_dirty") and user_id:
-        save_persisted(user_id)
-        st.session_state["_dirty"] = False
-        st.success(f"✅ Saved inputs for {user_id}")
-    elif st.session_state.get("_dirty") and not user_id:
-        st.warning("⚠️ Inputs changed but not saved (no User ID).")
+    # Save button
+    if st.button("💾 Save All Inputs"):
+        if not user_id:
+            st.warning("⚠️ Enter a User ID in the sidebar to enable persistence.")
+        else:
+            try:
+                save_persisted(user_id)
+                st.success(f"✅ Saved inputs for {user_id} into `{get_data_file(user_id)}`")
+            except Exception as e:
+                st.error(f"❌ Failed to save data: {e}")
 
     if user_id:
-        st.caption(f"Tab 0 fields auto-save to `{get_data_file(user_id)}`")
+        st.caption(f"Tab 0 fields will be stored in `{get_data_file(user_id)}`")
     else:
         st.caption("⚠️ Enter a User ID to enable persistence.")
-
-
 
 
 # ------------------------------------------------------------
@@ -653,7 +711,11 @@ with TABS[6]:
         RULES:
         - Strictly exclude anything listed under "Out of Scope".
         - If an item overlaps, clearly state it in the Out of Scope section.
-
+        - Timelines should always start one week from today.
+        - The project must end no later than the date mentioned in "Expected Timeline / Milestones" from Tab 0.
+        - Do not use arbitrary earlier dates (e.g., 2024 if current year is 2025).
+        - Ensure the Timeline & Milestones section reflects this constraint.
+        
         CONTEXT:
         --- Market Intel ---
         {market_intel}
