@@ -49,8 +49,10 @@ else:
 PERSIST_KEYS = [
     "company_profile","customer_overview","rfp_scope","objectives","stakeholders",
     "timeline","competitors","incumbent","constraints","pain_points",
-    "win_themes","success_metrics","extras"
+    "win_themes","success_metrics","extras",
+    "evaluation_criteria","out_of_scope"
 ]
+
 DATA_FILE = os.getenv("PROPOSAL_STORE", "proposal_inputs.json")
 
 def load_persisted():
@@ -226,6 +228,8 @@ with TABS[0]:
         st.text_area("Initial Win Themes", key="win_themes", height=140, on_change=mark_dirty)
         st.text_area("What does success look like?", key="success_metrics", height=140, on_change=mark_dirty)
         st.text_area("Any other context", key="extras", height=100, on_change=mark_dirty)
+        st.text_area("Evaluation Criteria", key="evaluation_criteria", height=100, on_change=mark_dirty)
+        st.text_area("Out of Scope", key="out_of_scope", height=100, on_change=mark_dirty)
 
     if st.session_state.get("_dirty"):
         save_persisted()
@@ -261,22 +265,27 @@ with TABS[1]:
 
     if st.session_state.get("_hash_market") != h or not st.session_state.get("market_intel"):
         base_prompt = dedent(f"""
-            Context (inputs + prior outputs):
+    Context (inputs + prior outputs):
 
-            {full_ctx}
+    {full_ctx}
 
-            TASK — MARKET & COMPETITOR INTELLIGENCE
+    TASK — MARKET & COMPETITOR INTELLIGENCE
 
-            1) Market Snapshot (3–5 bullets): key trends, buying criteria, risks.
+    RULES:
+    - Do NOT include or analyze any areas listed in the "Out of Scope" input.
+    - If a competitor is strong in an out-of-scope area, mark it as irrelevant.
 
-            2) Likely Competitors & Their USPs — Markdown table.
-               Must include: {", ".join(effective_list)}
+    1) Market Snapshot (3–5 bullets): key trends, buying criteria, risks.
 
-               Columns:
-               | Competitor | Primary Plays | 3 Specific USPs | Where They Win | Where They’re Weak | Price Posture | Our Counter-Moves |
+    2) Likely Competitors & Their USPs — Markdown table.
+       Must include: {", ".join(effective_list)}
 
-            3) Evidence to Request (5–7 bullets).
-        """).strip()
+       Columns:
+       | Competitor | Primary Plays | 3 Specific USPs | Where They Win | Where They’re Weak | Price Posture | Our Counter-Moves |
+
+    3) Evidence to Request (5–7 bullets).
+""").strip()
+
 
         draft = ask_genai("Market Intelligence", base_prompt)
         st.session_state["market_intel"] = draft
@@ -297,21 +306,26 @@ with TABS[2]:
 
     if st.session_state.get("_hash_key_aspects") != h or not st.session_state.get("rfp_key_aspects"):
         prompt = dedent(f"""
-            You are a capture strategist. From the context, extract only win-critical aspects.
+    You are a capture strategist. From the context, extract only win-critical aspects.
 
-            OUTPUT:
-            1) **Top Win-Critical Aspects** — table with columns:
-               | Aspect | Why it matters for {client_name} | Evidence to Show | Our Positioning | Risk (L/M/H) | Eval Criterion |
-            2) **Not Win-Critical / De-scoped** — bullets
-            3) **Clarifications to Request** — bullets
-            4) **Eval Mapping** — short table.
+    RULES:
+    - Absolutely ignore anything in "Out of Scope".
+    - Out-of-scope items must be listed under "Not Win-Critical / De-scoped".
 
-            CONTEXT:
-            --- MARKET INTEL ---
-            {market_intel}
-            --- INPUTS ---
-            {full_ctx}
-        """).strip()
+    OUTPUT:
+    1) **Top Win-Critical Aspects** — table with columns:
+       | Aspect | Why it matters for {client_name} | Evidence to Show | Our Positioning | Risk (L/M/H) | Eval Criterion |
+    2) **Not Win-Critical / De-scoped** — bullets (must include all Out of Scope items)
+    3) **Clarifications to Request** — bullets
+    4) **Eval Mapping** — short table.
+
+    CONTEXT:
+    --- MARKET INTEL ---
+    {market_intel}
+    --- INPUTS (with Evaluation Criteria & Out of Scope) ---
+    {full_ctx}
+""").strip()
+
 
         out = ask_genai("Key Aspects (Win-Critical)", prompt)
         st.session_state["rfp_key_aspects"] = out
@@ -368,26 +382,32 @@ with TABS[3]:
 
     if st.session_state.get("_hash_spend") != h or not st.session_state.get("spend_analysis"):
         prompt = dedent(f"""
-            You are a market analyst.
+You are a market analyst.
 
-            STRICT OUTPUT RULES:
-            - Return JSON **only** (no markdown, no prose, no ``` fences).
-            - JSON must have EXACT keys:
-              "market_label", "geo", "period", "method",
-              "market_total_gbp", "customer_spend_gbp", "share_pct",
-              "assumptions", "low_high_range_gbp", "explain", "confidence"
-            - "market_total_gbp" = IT/project market size (not company revenue).
-            - "customer_spend_gbp" = client’s spend on IT/project work (not total earnings).
-            - "share_pct": number only (no % sign).
-            - "low_high_range_gbp": array of 2 numbers.
-            - "assumptions": list of strings.
-            - "explain": short string.
-            - "confidence": one of "low","medium","high".
+RULES:
+- Exclude all Out of Scope items from analysis.
+- Return JSON ONLY (no markdown).
+- JSON must have EXACT keys:
+  "market_label", "geo", "period", "method",
+  "market_total_gbp", "customer_spend_gbp", "share_pct",
+  "assumptions", "low_high_range_gbp", "explain", "confidence"
 
-            CONTEXT:
-            {key_aspects}
-            {full_ctx}
-        """).strip()
+IMPORTANT:
+- "assumptions" must be a LIST of key:value strings.
+- Each assumption must have BOTH a key and value.
+- Example:
+  "assumptions": [
+    "currency: GBP",
+    "items_included: Application migration, Cloud hosting",
+    "items_excluded: Data cleansing, Data validation, Training"
+  ]
+
+CONTEXT:
+{key_aspects}
+{full_ctx}
+""").strip()
+
+
 
         resp = ask_genai("Spend (JSON)", prompt, max_tokens=800)
         obj = _parse_spend_json(resp)
@@ -434,7 +454,12 @@ with TABS[3]:
 
         if data.get("assumptions"):
             st.markdown("**Assumptions used**")
-            for a in data["assumptions"]: st.write(f"- {a}")
+            assumptions = data["assumptions"]
+            if isinstance(assumptions, str):
+                assumptions = [assumptions]  # wrap single string into list
+            for a in assumptions:
+                st.markdown(f"- {a}")
+
 
         if data.get("explain"):
             st.markdown("**How these numbers were derived**")
@@ -467,27 +492,34 @@ with TABS[4]:
 
     if st.session_state.get("_hash_diff") != h or not st.session_state.get("differentiators"):
         prompt = dedent(f"""
-            You are a proposal strategist. Produce client-specific differentiators.
+    You are a proposal strategist. Produce client-specific differentiators.
 
-            OUTPUT:
-            1) Table with columns:
-               | Buyer Priority (Value/Innovation/Risk) | Differentiator (specific to {client_name}) | Proof/Evidence | Competitor Exposed | Client Impact |
-            2) How We Prove It — checklist bullets
-            3) Top 3 Win Themes — short bullets
+    RULES:
+    - Do NOT generate differentiators for out-of-scope areas.
+    - Explicitly tie differentiators and win themes to the Evaluation Criteria input.
 
-            CONTEXT:
-            --- MARKET & COMPETITOR INTEL ---
-            {market_intel}
+    OUTPUT:
+    1) Table with columns:
+       | Buyer Priority (Value/Innovation/Risk) | Differentiator (specific to {client_name}) | Proof/Evidence | Competitor Exposed | Client Impact | Evaluation Criteria Addressed |
+    2) How We Prove It — checklist bullets
+    3) Top 3 Win Themes — short bullets, each one MUST clearly state which Evaluation Criterion it addresses.
 
-            --- WIN-CRITICAL ASPECTS ---
-            {key_aspects}
+    CONTEXT:
+    --- MARKET & COMPETITOR INTEL ---
+    {market_intel}
 
-            --- SPEND (JSON) ---
-            {spend_analysis}
+    --- WIN-CRITICAL ASPECTS ---
+    {key_aspects}
 
-            --- RAW INPUTS ---
-            {full_ctx}
-        """).strip()
+    --- SPEND (JSON) ---
+    {spend_analysis}
+
+    --- RAW INPUTS (including Evaluation Criteria & Out of Scope) ---
+    {full_ctx}
+""").strip()
+
+
+
 
         out = ask_genai("Key Differentiators", prompt)
         st.session_state["differentiators"] = out
@@ -654,48 +686,51 @@ with TABS[6]:
 
     def _mk_prompt():
         return dedent(f"""
-            Create a client-ready proposal draft for **{client_name}**.
+        Create a client-ready proposal draft for **{client_name}**.
 
-            SETTINGS:
-            - Tone: {tone}
-            - Length: {length}
-            - Executive Summary: {"Yes" if include_es else "No"}
-            - Format: Markdown with clear headings/bullets.
-            - No placeholders; tailor to context.
+        SETTINGS:
+        - Tone: {tone}
+        - Length: {length}
+        - Executive Summary: {"Yes" if include_es else "No"}
+        - Format: Markdown with clear headings/bullets.
 
-            REQUIRED SECTIONS:
-            1) Executive Summary (if enabled)
-            2) Understanding {client_name}'s Priorities
-            3) Proposed Solution & Delivery
-            4) Differentiators & Proof
-            5) Commercials & Pricing Rationale
-            6) Risks & Mitigations
-            7) Timeline & Milestones
-            8) Success Metrics & Value
-            9) Assumptions & Dependencies
-            10) Next Steps
+        REQUIRED SECTIONS:
+        1) Executive Summary (if enabled)
+        2) Understanding {client_name}'s Priorities
+        3) Proposed Solution & Delivery
+        4) Differentiators & Proof
+        5) Commercials & Pricing Rationale
+        6) Risks & Mitigations
+        7) Timeline & Milestones
+        8) Success Metrics & Value
+        9) Assumptions & Dependencies
+        10) Out of Scope (explicitly list and state exclusions)
+        11) Next Steps
 
-            If 'Outline only', return bullets under each section.
+        RULES:
+        - Strictly exclude anything listed under "Out of Scope".
+        - If an item overlaps, clearly state it in the Out of Scope section.
 
-            CONTEXT:
-            --- Market Intel ---
-            {market_intel}
+        CONTEXT:
+        --- Market Intel ---
+        {market_intel}
 
-            --- Win-Critical Aspects ---
-            {key_aspects}
+        --- Win-Critical Aspects ---
+        {key_aspects}
 
-            --- Differentiators ---
-            {differentiators}
+        --- Differentiators ---
+        {differentiators}
 
-            --- Spend ---
-            {spend_analysis}
+        --- Spend ---
+        {spend_analysis}
 
-            --- Commercial Strategy ---
-            {pricing}
+        --- Commercial Strategy ---
+        {pricing}
 
-            --- Inputs ---
-            {full_ctx}
-        """)
+        --- Inputs (including Out of Scope) ---
+        {full_ctx}
+    """)
+
 
     if btn:
         mode = "Storyboard" if outline_only else "Full Draft"
