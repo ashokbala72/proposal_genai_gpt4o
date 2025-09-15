@@ -309,129 +309,172 @@ with TABS[2]:
     st.markdown(st.session_state.get("rfp_key_aspects", "_Generating…_"))
 
 # ------------------------------------------------------------
-# Tab: Spend (Market & Customer) with Benchmarks + Validation
+# Tab: Spend (Market & Customer) - ERU Generalized
 # ------------------------------------------------------------
 with TABS[3]:
     st.subheader("Spend (Market & Customer)")
 
-    import csv, re
+    import json
 
-    # --- Load UK ERU benchmarks ---
-    BENCHMARKS = []
-    try:
-        with open("uk_eru_benchmarks.csv") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                BENCHMARKS.append(row)
-    except Exception:
-        st.warning("⚠️ Could not load benchmark CSV. Using GPT-only mode.")
+    # --- Sector totals (regulator-sourced, 5-year periods annualised) ---
+    SECTOR_TOTALS = {
+        "water": 104_000_000_000 / 5,   # Ofwat PR24: £104B over 5 years → £20.8B/year
+        "elec_dist": 24_800_000_000 / 5, # Ofgem RIIO-ED2: £24.8B (2023–28) → ~£5B/year
+        "elec_trans": 30_000_000_000 / 5, # Ofgem RIIO-T2: ~£30B (2021–26) → ~£6B/year
+        "gas_dist": 23_900_000_000 / 5,   # Ofgem RIIO-GD2: £23.9B (2021–26) → ~£4.8B/year
+        "energy_retail": 65_000_000_000,  # BEIS/market est. ~£60–70B/year
+        "renewables": 18_000_000_000,     # BEIS est. ~£15–20B/year
+    }
 
-    def _find_benchmark(scope: str):
-        for row in BENCHMARKS:
-            if row["sector"].lower() in scope.lower():
-                return row
-        return None
+    # --- Company-specific allowances (annualised where known) ---
+    COMPANY_ALLOWANCES = {
+        # Water (Ofwat PR24)
+        "affinity water": 2_300_000_000 / 5,  # £2.3B → ~£460M/year
+        "thames water": 18_000_000_000 / 5,   # ~£18B → ~£3.6B/year
+        "united utilities": 13_000_000_000 / 5, # ~£13B → ~£2.6B/year
 
-    # --- JSON extractor ---
-    def extract_json_block(text: str):
-        if not text:
-            return None
-        m = re.search(r"```(?:json)?(.*?)```", text, re.DOTALL)
-        if m:
-            raw = m.group(1).strip()
-        else:
-            start, end = text.find("{"), text.rfind("}")
-            raw = text[start:end+1] if start != -1 and end != -1 else text
-        try:
-            return json.loads(raw)
-        except Exception:
-            return None
+        # Electricity Distribution (RIIO-ED2)
+        "uk power networks": 6_800_000_000 / 5, # ~£6.8B → £1.36B/year
+        "western power distribution": 7_800_000_000 / 5, # ~£1.56B/year
+        "scottish power energy networks": 3_900_000_000 / 5, # ~£780M/year
 
-    # --- Context ---
-    full_ctx = gather_all_inputs()
-    key_aspects = st.session_state.get("rfp_key_aspects", "")
-    scope_text = st.session_state.get("rfp_scope", "") + " " + st.session_state.get("customer_overview", "")
-    benchmark = _find_benchmark(scope_text)
-    h = ctx_hash(full_ctx, key_aspects, str(benchmark), "spend_json_v8")
+        # Gas Distribution (RIIO-GD2)
+        "cadent gas": 13_000_000_000 / 5,  # ~£2.6B/year
+        "northern gas networks": 3_000_000_000 / 5, # ~£600M/year
 
-    if st.button("🔄 Refresh Spend Analysis"):
-        st.session_state["_hash_spend"] = None
-        st.session_state["spend_analysis"] = ""
+        # Transmission (RIIO-T2)
+        "national grid": 16_000_000_000 / 5, # ~£3.2B/year
+    }
 
-    if st.session_state.get("_hash_spend") != h or not st.session_state.get("spend_analysis"):
-        bench_text = f"Known UK ERU benchmark: {benchmark}" if benchmark else "No benchmark available."
-        prompt = dedent(f"""
-        You are a market analyst.
+    # --- Detect client ---
+    client = get_client_name().lower()
 
-        RULES:
-        - Exclude all Out of Scope items.
-        - Return JSON ONLY. No prose, no markdown, no code fences.
-        - Schema must include:
-          "market_label", "geo", "period", "method",
-          "market_total_gbp", "customer_spend_gbp", "share_pct",
-          "assumptions", "low_high_range_gbp", "explain", "confidence"
-        - Ensure share_pct = (customer_spend_gbp ÷ market_total_gbp) × 100.
-        - Do NOT return values where share_pct > 25% unless explicitly justified.
-        - Market totals must align with UK ERU benchmarks if available.
+    # Default values
+    market_total = None
+    customer_spend = None
+    sector = None
 
-        {bench_text}
+    if "water" in client:
+        sector = "water"
+        market_total = SECTOR_TOTALS["water"]
+        customer_spend = COMPANY_ALLOWANCES.get(client, None)
 
-        CONTEXT:
-        {key_aspects}
-        {full_ctx}
-        """).strip()
+    elif "power" in client or "distribution" in client:
+        sector = "elec_dist"
+        market_total = SECTOR_TOTALS["elec_dist"]
+        customer_spend = COMPANY_ALLOWANCES.get(client, None)
 
-        resp = ask_genai("Spend (JSON)", prompt, max_tokens=800)
-        obj = extract_json_block(resp)
+    elif "grid" in client or "transmission" in client:
+        sector = "elec_trans"
+        market_total = SECTOR_TOTALS["elec_trans"]
+        customer_spend = COMPANY_ALLOWANCES.get(client, None)
 
-        # Retry if failed
-        if not obj:
-            retry_prompt = prompt + "\n\nYour last output was invalid. Return valid JSON only."
-            resp = ask_genai("Spend (Retry JSON)", retry_prompt, max_tokens=800)
-            obj = extract_json_block(resp)
+    elif "gas" in client:
+        sector = "gas_dist"
+        market_total = SECTOR_TOTALS["gas_dist"]
+        customer_spend = COMPANY_ALLOWANCES.get(client, None)
 
-        # --- Post-validate & fix share ---
-        if obj:
-            mt = obj.get("market_total_gbp")
-            cs = obj.get("customer_spend_gbp")
-            if mt and cs:
-                recalculated = round((cs / mt) * 100, 1)
-                if abs(recalculated - obj.get("share_pct", 0)) > 1.0:
-                    st.warning(f"⚠️ Adjusted share %: recalculated {recalculated}% (was {obj.get('share_pct')}%).")
-                    obj["share_pct"] = recalculated
-
-            st.session_state["spend_analysis"] = json.dumps(obj, indent=2)
-            st.session_state["_hash_spend"] = h
-        else:
-            st.error("❌ GenAI did not return valid spend JSON.")
-            with st.expander("Raw GenAI Output"):
-                st.text(resp or "(empty)")
-
-    raw = st.session_state.get("spend_analysis")
-    data = json.loads(raw) if raw else None
-
-    # --- Show Benchmark ---
-    if benchmark:
-        st.info(f"📊 Benchmark: {benchmark['sector']} ({benchmark['period']}) — "
-                f"£{float(benchmark['total_spend_gbp']):,.0f} ({benchmark['notes']})")
-
-    # --- Show Data ---
-    if data:
-        c1,c2,c3 = st.columns(3)
-        with c1: st.metric("Market total (GBP)", f"£{data.get('market_total_gbp',0):,.0f}")
-        with c2: st.metric(f"{get_client_name()} spend", f"£{data.get('customer_spend_gbp',0):,.0f}")
-        with c3: st.metric("Share %", f"{data.get('share_pct',0):.1f}%")
-        st.write("**Assumptions:**", data.get("assumptions"))
-        st.write("**How derived:**", data.get("explain"))
     else:
-        st.info("_No spend analysis yet._")
+        # Retail / Renewables fallback
+        if "sse" in client or "centrica" in client or "octopus" in client:
+            sector = "energy_retail"
+            market_total = SECTOR_TOTALS["energy_retail"]
+        elif "renewable" in client or "bp" in client or "shell" in client:
+            sector = "renewables"
+            market_total = SECTOR_TOTALS["renewables"]
+
+        # Fallback: customer spend from GPT (bounded)
+        prompt = f"""
+        Estimate annual spend for {client} as a fraction of the UK {sector} market total (£{market_total:,.0f}).
+        Keep realistic (1–5% typical).
+        Return JSON: {{"customer_spend_gbp": number}}
+        """
+        resp = ask_genai("Customer Spend JSON", prompt, max_tokens=300)
+        try:
+            m = re.search(r"\{.*\}", resp, re.DOTALL)
+            if m:
+                customer_spend = json.loads(m.group(0)).get("customer_spend_gbp")
+        except:
+            customer_spend = None
+
+    # --- Compute share ---
+    if market_total and customer_spend:
+        share_pct = round(customer_spend / market_total * 100, 1)
+        st.session_state["spend_analysis"] = {
+            "market_total_gbp": market_total,
+            "customer_spend_gbp": customer_spend,
+            "share_pct": share_pct,
+            "assumptions": [
+                f"Market total from regulator ({sector}).",
+                f"{client.title()} allowance where published; else GPT-estimated."
+            ],
+            "confidence": "High" if client in COMPANY_ALLOWANCES else "Medium"
+        }
+    else:
+        st.error("❌ Could not resolve spend data for this client.")
+        st.stop()
+
+    # --- Display results ---
+    data = st.session_state["spend_analysis"]
+    c1, c2, c3 = st.columns(3)
+    with c1: st.metric("Market total (GBP)", f"£{data['market_total_gbp']:,.0f}")
+    with c2: st.metric(f"{get_client_name()} spend", f"£{data['customer_spend_gbp']:,.0f}")
+    with c3: st.metric("Share %", f"{data['share_pct']:.1f}%")
+
+    st.write("**Assumptions:**", data["assumptions"])
+    st.write("**Confidence:**", data["confidence"])
+
+    # --- Layman-friendly explanation ---
+    st.markdown(
+        f"""
+        ### 💡 In simple terms:
+        The regulator has set the total market size for the **{sector.replace('_',' ').title()} sector**
+        at about **£{data['market_total_gbp']/1_000_000_000:.1f} billion per year**.  
+
+        For **{get_client_name()}**, the allowed or estimated spend is about
+        **£{data['customer_spend_gbp']/1_000_000:.0f} million per year**.  
+
+        This means {get_client_name()} controls around **{data['share_pct']}% of the sector’s total spend**.
+        """
+    )
+
 
 # ------------------------------------------------------------
-# 4) Key Differentiators
+# 4) Key Differentiators (Client-Specific)
 # ------------------------------------------------------------
 with TABS[4]:
     st.subheader("Key Differentiators (Client-Specific)")
 
+    import os
+    from openai import AzureOpenAI
+
+    # --- Ensure GenAI client is initialised in session ---
+    if "genai_client" not in st.session_state:
+        try:
+            st.session_state["genai_client"] = AzureOpenAI(
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+            )
+            st.session_state["genai_deployment"] = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+        except Exception as e:
+            st.error(f"⚠️ Failed to initialise Azure OpenAI client: {e}")
+            st.stop()
+
+    def ask_genai(tag, prompt, max_tokens=800, temperature=0):
+        """Robust wrapper for Azure OpenAI chat calls"""
+        try:
+            resp = st.session_state["genai_client"].chat.completions.create(
+                model=st.session_state["genai_deployment"],
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            return f"[GenAI call failed: {e}]"
+
+    # --- Gather inputs for context ---
     full_ctx       = gather_all_inputs()
     market_intel   = st.session_state.get("market_intel", "")
     key_aspects    = st.session_state.get("rfp_key_aspects", "")
@@ -439,113 +482,169 @@ with TABS[4]:
     competitors    = st.session_state.get("competitors", "")
     client_name    = get_client_name()
 
-    h = ctx_hash(full_ctx, market_intel, key_aspects, spend_analysis, competitors, "key_differentiators_v2")
+    # --- Hash to cache results ---
+    h = ctx_hash(full_ctx, market_intel, key_aspects, spend_analysis, competitors, "key_differentiators_v3")
 
+    # --- Only regenerate if inputs changed ---
     if st.session_state.get("_hash_diff") != h or not st.session_state.get("differentiators"):
         prompt = dedent(f"""
-    You are a proposal strategist. Produce client-specific differentiators.
+        You are a proposal strategist. Produce client-specific differentiators.
 
-    RULES:
-    - Do NOT generate differentiators for out-of-scope areas.
-    - Explicitly tie differentiators and win themes to the Evaluation Criteria input.
+        RULES:
+        - Do NOT generate differentiators for out-of-scope areas.
+        - Explicitly tie differentiators and win themes to the Evaluation Criteria input.
 
-    OUTPUT:
-    1) Table with columns:
-       | Buyer Priority (Value/Innovation/Risk) | Differentiator (specific to {client_name}) | Proof/Evidence | Competitor Exposed | Client Impact | Evaluation Criteria Addressed |
-    2) How We Prove It — checklist bullets
-    3) Top 3 Win Themes — short bullets, each one MUST clearly state which Evaluation Criterion it addresses.
+        OUTPUT:
+        1) Table with columns:
+           | Buyer Priority (Value/Innovation/Risk) | Differentiator (specific to {client_name}) | Proof/Evidence | Competitor Exposed | Client Impact | Evaluation Criteria Addressed |
+        2) How We Prove It — checklist bullets
+        3) Top 3 Win Themes — short bullets, each one MUST clearly state which Evaluation Criterion it addresses.
 
-    CONTEXT:
-    --- MARKET & COMPETITOR INTEL ---
-    {market_intel}
+        CONTEXT:
+        --- MARKET & COMPETITOR INTEL ---
+        {market_intel}
 
-    --- WIN-CRITICAL ASPECTS ---
-    {key_aspects}
+        --- WIN-CRITICAL ASPECTS ---
+        {key_aspects}
 
-    --- SPEND (JSON) ---
-    {spend_analysis}
+        --- SPEND (JSON) ---
+        {spend_analysis}
 
-    --- RAW INPUTS (including Evaluation Criteria & Out of Scope) ---
-    {full_ctx}
-""").strip()
-
-
-
+        --- RAW INPUTS (including Evaluation Criteria & Out of Scope) ---
+        {full_ctx}
+        """).strip()
 
         out = ask_genai("Key Differentiators", prompt)
         st.session_state["differentiators"] = out
         st.session_state["_hash_diff"] = h
 
-    st.markdown(st.session_state.get("differentiators", "_Generating…_"))
+    # --- Display results ---
+    differentiators_output = st.session_state.get("differentiators", "")
+    if differentiators_output and not differentiators_output.startswith("[GenAI call failed"):
+        st.markdown(differentiators_output)
+    else:
+        st.warning("⚠️ Could not generate differentiators. Please check Azure setup or inputs.")
 
 # ------------------------------------------------------------
-# Tab: Commercial & Pricing Strategy (Controlled Roles + Hours)
+# Tab: Commercial & Pricing Strategy (Tightened & Sector-Aware)
 # ------------------------------------------------------------
 with TABS[5]:
-    st.subheader("Commercial & Pricing Strategy (Skill-Rate Aware)")
+    st.subheader("Commercial & Pricing Strategy")
 
-    import pandas as pd, re
+    import pandas as pd, re, json
 
-    # Load rate card
+    # --- Load rate card ---
     try:
         rate_card = pd.read_csv("rate_card.csv")
     except Exception:
-        st.error("⚠️ Rate card CSV missing. Using placeholder rates.")
+        st.error("⚠️ Rate card CSV missing. Using fallback.")
         rate_card = pd.DataFrame([
             {"Skill":"Project Manager","Onshore £/hr":110,"Offshore £/hr":45},
             {"Skill":"SAP ABAP Developer","Onshore £/hr":95,"Offshore £/hr":38},
             {"Skill":"Azure Cloud Architect","Onshore £/hr":120,"Offshore £/hr":50},
             {"Skill":"Data Engineer","Onshore £/hr":100,"Offshore £/hr":40},
             {"Skill":"QA/Test Lead","Onshore £/hr":90,"Offshore £/hr":35},
-            {"Skill":"Business Analyst","Onshore £/hr":105,"Offshore £/hr":42}
+            {"Skill":"Business Analyst","Onshore £/hr":105,"Offshore £/hr":42},
+            {"Skill":"Salesforce Developer","Onshore £/hr":115,"Offshore £/hr":48},
         ])
 
-    # Role library (IT-focused)
-    ROLE_LIBRARY = {
-        "SAP": ["SAP ABAP Developer","SAP FICO Consultant"],
-        "Cloud": ["Azure Cloud Architect","DevOps Engineer"],
-        "CRM": ["Salesforce Developer","Oracle Utilities Consultant"],
-        "Data": ["Data Engineer","BI Consultant","AI/ML Engineer"],
-        "Generic": ["Project Manager","Business Analyst","QA/Test Lead"]
-    }
+    rate_card_roles = rate_card["Skill"].tolist()
 
-    # Always include Generic roles, add others if keywords match
-    scope_text = (st.session_state.get("rfp_scope","") + " " + 
-                  st.session_state.get("objectives","")).lower()
-    roles = set(ROLE_LIBRARY["Generic"])
-    for k,v in ROLE_LIBRARY.items():
-        if k.lower() in scope_text:
-            roles.update(v)
+    # --- Context inputs ---
+    scope_text = st.session_state.get("rfp_scope","")
+    objectives = st.session_state.get("objectives","")
+    constraints = st.session_state.get("constraints","")
 
-    df_rates = rate_card[rate_card["Skill"].isin(roles)].copy()
+    # --- Excluded irrelevant roles ---
+    EXCLUDED = ["Mobile Developer", "iOS", "Android", "Game", "Unity", "Frontend (Mobile)"]
 
-    # Hours calculation from timeline (fallback = 12 months)
+    # --- GPT Role Extraction ---
+    role_prompt = f"""
+    You are identifying IT roles required for an RFP.
+
+    CONTEXT:
+    - Sector: Energy, Resources & Utilities (ERU)
+    - RFP Scope: {scope_text}
+    - Objectives: {objectives}
+    - Constraints: {constraints}
+
+    RULES:
+    - Only include roles relevant to large-scale IT transformation, data, cloud, ERP, integration, testing, and utilities sector.
+    - Do NOT include mobile app developers, game developers, or unrelated roles unless explicitly mentioned.
+    - Return JSON only: {{"roles": ["Skill1", "Skill2", ...]}}
+    - Use industry-standard IT services role names (SAP ABAP Developer, Azure Architect, Data Engineer, QA/Test Lead, etc.).
+    """
+
+    resp_roles = ask_genai("Role Identification", role_prompt, max_tokens=400)
+
+    try:
+        roles_json = json.loads(re.search(r"\{.*\}", resp_roles, re.DOTALL).group(0))
+        roles_from_gpt = roles_json.get("roles", [])
+    except:
+        st.warning("⚠️ Could not parse GPT roles, using fallback generic roles.")
+        roles_from_gpt = ["Project Manager","Business Analyst","QA/Test Lead"]
+
+    # --- Filter out irrelevant roles ---
+    roles_from_gpt = [r for r in roles_from_gpt if not any(x.lower() in r.lower() for x in EXCLUDED)]
+
+    # --- Role Mapping to Rate Card ---
+    def map_role_to_ratecard(role, rate_card_roles):
+        prompt = f"""
+        The role "{role}" is not in our rate card.
+        Available rate card roles: {rate_card_roles}
+
+        TASK:
+        - Pick the closest matching role from the list.
+        - Return JSON only:
+        {{"original_role": "{role}", "mapped_role": "ClosestRole"}}
+        """
+        resp = ask_genai("Role Mapping", prompt, max_tokens=200)
+        try:
+            obj = json.loads(re.search(r"\{.*\}", resp, re.DOTALL).group(0))
+            return obj.get("mapped_role")
+        except:
+            return None
+
+    roles_final = []
+    for role in roles_from_gpt:
+        if role in rate_card_roles:
+            roles_final.append(role)
+        else:
+            mapped = map_role_to_ratecard(role, rate_card_roles)
+            if mapped:
+                roles_final.append(mapped)
+            else:
+                st.warning(f"⚠️ No mapping found for '{role}'. Please update rate card.")
+
+    roles_final = list(set(roles_final))  # deduplicate
+    df_rates = rate_card[rate_card["Skill"].isin(roles_final)].copy()
+
+    # --- Hours Calculation ---
     timeline = st.session_state.get("timeline","12 months")
     months = 12
     m = re.search(r"(\d+)", timeline)
     if m: months = int(m.group(1))
     baseline_hours = months * 160
 
-    # --- Ask GPT to distribute hours ---
-    roles_list = df_rates["Skill"].tolist()
-    prompt = f"""
-    Distribute {baseline_hours} hours per role across the following roles:
-    {roles_list}
+    prompt_hours = f"""
+    Distribute {baseline_hours} hours per role across these roles:
+    {roles_final}
 
     RULES:
     - Return JSON array: [{{"Skill": "...", "Hours": ...}}, ...]
     - Do not invent roles.
-    - Hours must sum close to {baseline_hours * len(roles_list)} (±10%).
+    - Hours must sum close to {baseline_hours * len(roles_final)} (±10%).
     """
-    resp = ask_genai("Distribute Hours", prompt, max_tokens=400)
+    resp_hours = ask_genai("Hours Distribution", prompt_hours, max_tokens=400)
 
     def extract_json_list(text):
-        m = re.search(r"```(?:json)?(.*?)```", text, re.DOTALL)
-        raw = m.group(1).strip() if m else text
-        try: return json.loads(raw)
-        except: return None
+        try:
+            raw = re.search(r"\[.*\]", text, re.DOTALL).group(0)
+            return json.loads(raw)
+        except:
+            return None
 
-    hours_data = extract_json_list(resp) or []
+    hours_data = extract_json_list(resp_hours) or []
     if hours_data:
         hours_map = {r["Skill"]: r["Hours"] for r in hours_data if "Skill" in r}
         df_rates["Hours"] = df_rates["Skill"].map(hours_map).fillna(baseline_hours)
@@ -553,7 +652,7 @@ with TABS[5]:
         st.warning("⚠️ GPT did not return hours. Using equal baseline per role.")
         df_rates["Hours"] = baseline_hours
 
-    # Onshore/Offshore mix (default 30/70, can adjust later)
+    # --- Costing ---
     df_rates["Onshore %"] = 30
     df_rates["Offshore %"] = 70
     df_rates["Onshore Cost"] = df_rates["Hours"] * df_rates["Onshore £/hr"] * (df_rates["Onshore %"]/100)
@@ -561,9 +660,10 @@ with TABS[5]:
     df_rates["Total Cost"] = df_rates["Onshore Cost"] + df_rates["Offshore Cost"]
 
     # --- Show results ---
-    st.write("### Pricing Table with Hours")
+    st.write("### Pricing Table with Roles & Hours")
     st.dataframe(df_rates, use_container_width=True)
     st.metric("Total Estimated Cost (GBP)", f"£{df_rates['Total Cost'].sum():,.0f}")
+
 
 
 # ------------------------------------------------------------

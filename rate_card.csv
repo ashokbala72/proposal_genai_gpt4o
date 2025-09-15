@@ -1,0 +1,53 @@
+Skill,Onshore £/hr,Offshore £/hr
+Project Manager,110,45
+Program Manager,130,55
+Scrum Master,95,40
+Business Analyst,105,42
+Change Manager,115,48
+Solution Architect,140,60
+Azure Cloud Architect,120,50
+AWS Cloud Architect,120,50
+Google Cloud Architect,115,48
+Cloud DevOps Engineer,105,42
+Systems Administrator,90,35
+Network Engineer,95,38
+Database Administrator,100,40
+Data Engineer,100,40
+Data Scientist,120,50
+BI Analyst (Power BI/Tableau),95,38
+MLOps Engineer,110,45
+AI/ML Engineer,125,52
+Cybersecurity Analyst,105,42
+Security Architect,130,55
+Penetration Tester,120,50
+GRC Consultant,110,45
+SOC Analyst,95,38
+QA/Test Engineer,85,32
+Test Automation Engineer,95,38
+Performance Tester,100,40
+QA/Test Lead,90,35
+UI/UX Designer,95,38
+Front-End Developer (React/Angular),100,40
+Back-End Developer (Java/.NET/Python),105,42
+Full-Stack Developer,115,46
+Mobile Developer (iOS/Android),110,44
+SAP ABAP Developer,95,38
+SAP FICO Consultant,110,45
+SAP Basis Administrator,115,48
+Oracle ERP Consultant,120,50
+Workday HCM Specialist,125,52
+Salesforce Developer,115,48
+Salesforce Architect,130,55
+ServiceNow Developer,110,45
+ServiceNow Architect,125,52
+ERP Integration Consultant,120,50
+ETL Developer (Informatica/Talend),100,40
+RPA Developer (UiPath/Automation Anywhere),105,42
+Mainframe Engineer,100,40
+Middleware Specialist,105,42
+API Developer,110,45
+Linux Administrator,95,38
+Windows Server Engineer,95,38
+Helpdesk Analyst,65,25
+Desktop Support Engineer,75,30
+Technical Writer,80,32
