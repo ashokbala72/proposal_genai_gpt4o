@@ -309,134 +309,126 @@ with TABS[2]:
     st.markdown(st.session_state.get("rfp_key_aspects", "_Generating…_"))
 
 # ------------------------------------------------------------
-# Tab: Spend (Market & Customer) - ERU Generalized
+# Tab: Spend (Market & Customer) with Hardcoded UK ERU Baselines
 # ------------------------------------------------------------
 with TABS[3]:
     st.subheader("Spend (Market & Customer)")
 
-    import json
+    import re, json
 
-    # --- Sector totals (regulator-sourced, 5-year periods annualised) ---
-    SECTOR_TOTALS = {
-        "water": 104_000_000_000 / 5,   # Ofwat PR24: £104B over 5 years → £20.8B/year
-        "elec_dist": 24_800_000_000 / 5, # Ofgem RIIO-ED2: £24.8B (2023–28) → ~£5B/year
-        "elec_trans": 30_000_000_000 / 5, # Ofgem RIIO-T2: ~£30B (2021–26) → ~£6B/year
-        "gas_dist": 23_900_000_000 / 5,   # Ofgem RIIO-GD2: £23.9B (2021–26) → ~£4.8B/year
-        "energy_retail": 65_000_000_000,  # BEIS/market est. ~£60–70B/year
-        "renewables": 18_000_000_000,     # BEIS est. ~£15–20B/year
-    }
-
-    # --- Company-specific allowances (annualised where known) ---
-    COMPANY_ALLOWANCES = {
-        # Water (Ofwat PR24)
-        "affinity water": 2_300_000_000 / 5,  # £2.3B → ~£460M/year
-        "thames water": 18_000_000_000 / 5,   # ~£18B → ~£3.6B/year
-        "united utilities": 13_000_000_000 / 5, # ~£13B → ~£2.6B/year
-
-        # Electricity Distribution (RIIO-ED2)
-        "uk power networks": 6_800_000_000 / 5, # ~£6.8B → £1.36B/year
-        "western power distribution": 7_800_000_000 / 5, # ~£1.56B/year
-        "scottish power energy networks": 3_900_000_000 / 5, # ~£780M/year
-
-        # Gas Distribution (RIIO-GD2)
-        "cadent gas": 13_000_000_000 / 5,  # ~£2.6B/year
-        "northern gas networks": 3_000_000_000 / 5, # ~£600M/year
-
-        # Transmission (RIIO-T2)
-        "national grid": 16_000_000_000 / 5, # ~£3.2B/year
-    }
-
-    # --- Detect client ---
-    client = get_client_name().lower()
-
-    # Default values
-    market_total = None
-    customer_spend = None
-    sector = None
-
-    if "water" in client:
-        sector = "water"
-        market_total = SECTOR_TOTALS["water"]
-        customer_spend = COMPANY_ALLOWANCES.get(client, None)
-
-    elif "power" in client or "distribution" in client:
-        sector = "elec_dist"
-        market_total = SECTOR_TOTALS["elec_dist"]
-        customer_spend = COMPANY_ALLOWANCES.get(client, None)
-
-    elif "grid" in client or "transmission" in client:
-        sector = "elec_trans"
-        market_total = SECTOR_TOTALS["elec_trans"]
-        customer_spend = COMPANY_ALLOWANCES.get(client, None)
-
-    elif "gas" in client:
-        sector = "gas_dist"
-        market_total = SECTOR_TOTALS["gas_dist"]
-        customer_spend = COMPANY_ALLOWANCES.get(client, None)
-
-    else:
-        # Retail / Renewables fallback
-        if "sse" in client or "centrica" in client or "octopus" in client:
-            sector = "energy_retail"
-            market_total = SECTOR_TOTALS["energy_retail"]
-        elif "renewable" in client or "bp" in client or "shell" in client:
-            sector = "renewables"
-            market_total = SECTOR_TOTALS["renewables"]
-
-        # Fallback: customer spend from GPT (bounded)
-        prompt = f"""
-        Estimate annual spend for {client} as a fraction of the UK {sector} market total (£{market_total:,.0f}).
-        Keep realistic (1–5% typical).
-        Return JSON: {{"customer_spend_gbp": number}}
-        """
-        resp = ask_genai("Customer Spend JSON", prompt, max_tokens=300)
-        try:
-            m = re.search(r"\{.*\}", resp, re.DOTALL)
-            if m:
-                customer_spend = json.loads(m.group(0)).get("customer_spend_gbp")
-        except:
-            customer_spend = None
-
-    # --- Compute share ---
-    if market_total and customer_spend:
-        share_pct = round(customer_spend / market_total * 100, 1)
-        st.session_state["spend_analysis"] = {
-            "market_total_gbp": market_total,
-            "customer_spend_gbp": customer_spend,
-            "share_pct": share_pct,
-            "assumptions": [
-                f"Market total from regulator ({sector}).",
-                f"{client.title()} allowance where published; else GPT-estimated."
-            ],
-            "confidence": "High" if client in COMPANY_ALLOWANCES else "Medium"
+    # --- UK ERU baselines (no external CSV required) ---
+    BENCHMARKS = [
+        {
+            "sector": "UK Water Utilities",
+            "total_spend_gbp": 21000000000,
+            "period": "2025-2030",
+            "notes": "Ofwat PR24 Final Determination baseline"
+        },
+        {
+            "sector": "UK Energy Retail",
+            "total_spend_gbp": 18000000000,
+            "period": "2025-2030",
+            "notes": "BEIS / OFGEM market benchmark"
+        },
+        {
+            "sector": "UK Transmission & Distribution",
+            "total_spend_gbp": 25000000000,
+            "period": "2025-2030",
+            "notes": "National Grid & DNOs regulated spend"
         }
-    else:
-        st.error("❌ Could not resolve spend data for this client.")
-        st.stop()
+    ]
 
-    # --- Display results ---
-    data = st.session_state["spend_analysis"]
-    c1, c2, c3 = st.columns(3)
-    with c1: st.metric("Market total (GBP)", f"£{data['market_total_gbp']:,.0f}")
-    with c2: st.metric(f"{get_client_name()} spend", f"£{data['customer_spend_gbp']:,.0f}")
-    with c3: st.metric("Share %", f"{data['share_pct']:.1f}%")
+    # --- Find relevant benchmark ---
+    def _find_benchmark(scope: str):
+        for row in BENCHMARKS:
+            if row["sector"].lower() in scope.lower():
+                return row
+        return BENCHMARKS[0]  # default to Water if no match
 
-    st.write("**Assumptions:**", data["assumptions"])
-    st.write("**Confidence:**", data["confidence"])
+    # --- JSON extractor ---
+    def extract_json_block(text: str):
+        if not text:
+            return None
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        try:
+            return json.loads(m.group(0)) if m else None
+        except Exception:
+            return None
 
-    # --- Layman-friendly explanation ---
-    st.markdown(
-        f"""
-        ### 💡 In simple terms:
-        The regulator has set the total market size for the **{sector.replace('_',' ').title()} sector**
-        at about **£{data['market_total_gbp']/1_000_000_000:.1f} billion per year**.  
+    # --- Context ---
+    full_ctx = gather_all_inputs()
+    key_aspects = st.session_state.get("rfp_key_aspects", "")
+    scope_text = st.session_state.get("rfp_scope", "") + " " + st.session_state.get("customer_overview", "")
+    benchmark = _find_benchmark(scope_text)
+    h = ctx_hash(full_ctx, key_aspects, str(benchmark), "spend_json_v9")
 
-        For **{get_client_name()}**, the allowed or estimated spend is about
-        **£{data['customer_spend_gbp']/1_000_000:.0f} million per year**.  
+    if st.button("🔄 Refresh Spend Analysis"):
+        st.session_state["_hash_spend"] = None
+        st.session_state["spend_analysis"] = ""
 
-        This means {get_client_name()} controls around **{data['share_pct']}% of the sector’s total spend**.
+    if st.session_state.get("_hash_spend") != h or not st.session_state.get("spend_analysis"):
+        prompt = f"""
+        You are a market analyst.
+
+        RULES:
+        - Return JSON only. No prose, no markdown.
+        - Schema: {{
+            "market_label": "...",
+            "geo": "UK",
+            "period": "{benchmark['period']}",
+            "method": "Benchmark + RFP inputs",
+            "market_total_gbp": {benchmark['total_spend_gbp']},
+            "customer_spend_gbp": number,
+            "share_pct": number,
+            "assumptions": "...",
+            "low_high_range_gbp": "...",
+            "explain": "...",
+            "confidence": "High/Medium/Low"
+        }}
+        - Ensure share_pct = (customer_spend_gbp ÷ market_total_gbp) × 100.
+        - Do NOT exceed 25% share unless explicitly justified.
+
+        CONTEXT:
+        {key_aspects}
+        {full_ctx}
         """
-    )
+
+        resp = ask_genai("Spend (JSON)", prompt, max_tokens=600)
+        obj = extract_json_block(resp)
+
+        if obj:
+            mt = obj.get("market_total_gbp")
+            cs = obj.get("customer_spend_gbp")
+            if mt and cs:
+                recalculated = round((cs / mt) * 100, 1)
+                obj["share_pct"] = recalculated
+            st.session_state["spend_analysis"] = json.dumps(obj, indent=2)
+            st.session_state["_hash_spend"] = h
+        else:
+            st.error("❌ Could not resolve spend data for this client.")
+            with st.expander("Raw GenAI Output"):
+                st.text(resp or "(empty)")
+
+    raw = st.session_state.get("spend_analysis")
+    data = json.loads(raw) if raw else None
+
+    # --- Show Benchmark ---
+    if benchmark:
+        st.info(f"📊 Benchmark: {benchmark['sector']} ({benchmark['period']}) — "
+                f"£{benchmark['total_spend_gbp']:,} ({benchmark['notes']})")
+
+    # --- Show Data ---
+    if data:
+        c1, c2, c3 = st.columns(3)
+        with c1: st.metric("Market total (GBP)", f"£{data.get('market_total_gbp',0):,.0f}")
+        with c2: st.metric(f"{get_client_name()} spend", f"£{data.get('customer_spend_gbp',0):,.0f}")
+        with c3: st.metric("Share %", f"{data.get('share_pct',0):.1f}%")
+        st.write("**Assumptions:**", data.get("assumptions"))
+        st.write("**How derived:**", data.get("explain"))
+        st.caption("ℹ️ Share % = Customer spend ÷ Market total × 100 (using UK ERU benchmarks).")
+    else:
+        st.info("_No spend analysis yet._")
+
 
 
 # ------------------------------------------------------------
